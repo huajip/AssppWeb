@@ -164,7 +164,8 @@ async function copyText(value: string) {
 
 function packageFileName(task: DownloadTask): string {
   const unsafeName = `${task.software.name}_${task.software.version}`;
-  const safeName = unsafeName.replace(/[\\/:*?"<>|]/g, '-');
+  // Keep in sync with backend sanitizeFilename (routes/packages.ts)
+  const safeName = unsafeName.replace(/[\x00-\x1F\x7F"\\/:*?<>|]/g, '-').trim().slice(0, 200);
   return `${safeName}.ipa`;
 }
 

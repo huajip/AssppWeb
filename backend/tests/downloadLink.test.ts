@@ -14,3 +14,13 @@ describe('download link tokens', () => {
     expect(verifyDownloadToken('pkg1', hash, undefined, sig, now)).toBe(false);
   });
 });
+
+import { contentDisposition } from '../src/routes/packages.js';
+describe('contentDisposition', () => {
+  it('encodes UTF-8 with ASCII fallback', () => {
+    const h = contentDisposition('原神_7.2.0.ipa');
+    expect(h).toContain(`filename*=UTF-8''${encodeURIComponent('原神_7.2.0.ipa')}`);
+    expect(h).toMatch(/filename="[\x20-\x7E]+"/);
+    expect(contentDisposition('a"b\r\n/c.ipa')).toContain('filename="a-b---c.ipa"');
+  });
+});

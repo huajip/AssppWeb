@@ -10,14 +10,21 @@ import type { PackageInfo } from '../types/index.js';
 
 const router = Router();
 
-// Sanitize filename for Content-Disposition to prevent header injection
-function sanitizeFilename(name: string): string {
-  // Remove control characters, quotes, backslashes, and non-ASCII
+// Strip control chars, quotes, slashes and other filesystem-unsafe chars (keeps Unicode)
+export function sanitizeFilename(name: string): string {
   return name
-    .replace(/[^\x20-\x7E]/g, '_')
-    .replace(/["\\]/g, '_')
-    .replace(/[\r\n]/g, '')
+    .replace(/[\x00-\x1F\x7F"\\/:*?<>|]/g, '-')
+    .trim()
     .slice(0, 200);
+}
+
+// RFC 6266 / RFC 5987: ASCII fallback in filename=, UTF-8 in filename* (Safari/Chrome/Firefox honor filename*)
+export function contentDisposition(fileName: string): string {
+  const safe = sanitizeFilename(fileName) || 'download.ipa';
+  let ascii = safe.replace(/[^\x20-\x7E]/g, '_').replace(/_+/g, '_');
+  if (!/[A-Za-z0-9]/.test(ascii.replace(/\.ipa$/i, '').replace(/[\d._-]/g, ''))) ascii = `app${ascii.startsWith('_') ? '' : '_'}${ascii}`;
+  const encoded = encodeURIComponent(safe).replace(/['()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
 }
 
 // List packages filtered by account hashes
@@ -105,10 +112,8 @@ router.get('/packages/:id/file', (req: Request, res: Response) => {
     return;
   }
 
-  const safeName = sanitizeFilename(task.software.name);
-  const safeVersion = sanitizeFilename(task.software.version);
-  const fileName = `${safeName}_${safeVersion}.ipa`;
-  res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+  const fileName = `${task.software.name}_${task.software.version}.ipa`;
+  res.setHeader('Content-Disposition', contentDisposition(fileName));
   res.setHeader('Content-Type', 'application/octet-stream');
 
   res.sendFile(resolvedPath, { acceptRanges: true, dotfiles: 'allow', headers: { 'Cache-Control': 'private, no-store' } }, (err) => {
