@@ -5,6 +5,7 @@ import { config } from '../config.js';
 import { MIN_ACCOUNT_HASH_LENGTH } from '../config.js';
 import { getAllTasks } from '../services/downloadManager.js';
 import { getIdParam } from '../utils/route.js';
+import { createDownloadToken } from '../utils/downloadLink.js';
 import type { PackageInfo } from '../types/index.js';
 
 const router = Router();
@@ -53,6 +54,28 @@ router.get('/packages', (req: Request, res: Response) => {
   res.json(packages);
 });
 
+// Issue a short-lived signed download link (requires access auth + accountHash)
+router.post('/packages/:id/download-link', (req: Request, res: Response) => {
+  const accountHash = (req.query.accountHash ?? req.body?.accountHash) as string;
+  if (!accountHash || accountHash.length < MIN_ACCOUNT_HASH_LENGTH) {
+    res.status(400).json({ error: 'Missing or invalid accountHash' });
+    return;
+  }
+  const id = getIdParam(req);
+  const task = getAllTasks().find((t) => t.id === id && t.status === 'completed');
+  if (!task || !task.filePath || !fs.existsSync(task.filePath)) {
+    res.status(404).json({ error: 'Package not found' });
+    return;
+  }
+  if (task.accountHash !== accountHash) {
+    res.status(403).json({ error: 'Access denied' });
+    return;
+  }
+  const { exp, sig } = createDownloadToken(id, accountHash);
+  const params = new URLSearchParams({ accountHash, exp: String(exp), sig });
+  res.json({ url: `/api/packages/${encodeURIComponent(id)}/file?${params}`, expiresAt: exp });
+});
+
 // Stream IPA file (requires accountHash)
 router.get('/packages/:id/file', (req: Request, res: Response) => {
   const accountHash = req.query.accountHash as string;
@@ -88,11 +111,9 @@ router.get('/packages/:id/file', (req: Request, res: Response) => {
   res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
   res.setHeader('Content-Type', 'application/octet-stream');
 
-  const stats = fs.statSync(resolvedPath);
-  res.setHeader('Content-Length', stats.size);
-
-  const stream = fs.createReadStream(resolvedPath);
-  stream.pipe(res);
+  res.sendFile(resolvedPath, { acceptRanges: true, dotfiles: 'allow', headers: { 'Cache-Control': 'private, no-store' } }, (err) => {
+    if (err && !res.headersSent) res.status(500).json({ error: 'Failed to send file' });
+  });
 });
 
 // Delete a package (requires accountHash)

@@ -71,20 +71,20 @@ export default function PackageQuickActions({ task, size = 'default' }: PackageQ
 
     try {
       const params = new URLSearchParams({ accountHash: task.accountHash });
-      const response = await fetch(`/api/packages/${task.id}/file?${params}`, {
+      const response = await fetch(`/api/packages/${task.id}/download-link?${params}`, {
+        method: 'POST',
         headers: authHeaders(),
       });
-      if (!response.ok) throw new Error('Download failed');
+      if (!response.ok) throw new Error('Download link failed');
+      const { url } = (await response.json()) as { url: string };
 
-      const blob = await response.blob();
-      const blobUrl = URL.createObjectURL(blob);
+      // Native browser download: streamed, shows progress, resumable.
       const anchor = document.createElement('a');
-      anchor.href = blobUrl;
+      anchor.href = url;
       anchor.download = packageFileName(task);
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();
-      URL.revokeObjectURL(blobUrl);
     } catch {
       addToast(t('downloads.package.downloadFailed'), 'error', t('downloads.package.downloadIpa'));
     }
