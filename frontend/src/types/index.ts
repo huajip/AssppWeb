@@ -65,6 +65,7 @@ export interface DownloadTask {
   id: string;
   software: Software;
   accountHash: string;
+  region?: string;
   status: 'pending' | 'downloading' | 'paused' | 'injecting' | 'completed' | 'failed';
   progress: number;
   speed: string;

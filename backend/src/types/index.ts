@@ -28,6 +28,8 @@ export interface DownloadTask {
   id: string;
   software: Software;
   accountHash: string;
+  /** App Store storefront country code at download time, e.g. CN/JP/US */
+  region?: string;
   downloadURL: string;
   sinfs: Sinf[];
   iTunesMetadata?: string;

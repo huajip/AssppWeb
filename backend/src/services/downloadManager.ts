@@ -409,12 +409,19 @@ export function resumeTask(id: string): boolean {
   return true;
 }
 
+export function normalizeRegion(region: unknown): string | undefined {
+  if (typeof region !== 'string') return undefined;
+  const r = region.trim().toUpperCase();
+  return /^[A-Z]{2}$/.test(r) ? r : undefined;
+}
+
 export function createTask(
   software: Software,
   accountHash: string,
   downloadURL: string,
   sinfs: Sinf[],
   iTunesMetadata?: string,
+  region?: string,
 ): DownloadTask {
   // Validate download URL
   validateDownloadURL(downloadURL);
@@ -431,6 +438,7 @@ export function createTask(
     downloadURL,
     sinfs,
     iTunesMetadata,
+    region: normalizeRegion(region),
     status: 'pending',
     progress: 0,
     speed: '0 B/s',

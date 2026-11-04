@@ -18,6 +18,15 @@ export function sanitizeFilename(name: string): string {
     .slice(0, 200);
 }
 
+// {name}_{bundleID}_{version}_{region}.ipa — region omitted when unknown (legacy tasks)
+// Keep in sync with frontend packageFileName (components/Download/PackageQuickActions.tsx)
+export function packageFileName(task: { software: { name: string; bundleID: string; version: string }; region?: string }): string {
+  const parts = [task.software.name, task.software.bundleID, task.software.version, task.region]
+    .filter((p): p is string => typeof p === 'string' && p.trim() !== '')
+    .map((p) => p.replace(/_+/g, '-').replace(/\s+/g, ' ').trim());
+  return `${sanitizeFilename(parts.join('_'))}.ipa`;
+}
+
 // RFC 6266 / RFC 5987: ASCII fallback in filename=, UTF-8 in filename* (Safari/Chrome/Firefox honor filename*)
 export function contentDisposition(fileName: string): string {
   const safe = sanitizeFilename(fileName) || 'download.ipa';
@@ -112,7 +121,7 @@ router.get('/packages/:id/file', (req: Request, res: Response) => {
     return;
   }
 
-  const fileName = `${task.software.name}_${task.software.version}.ipa`;
+  const fileName = packageFileName(task);
   res.setHeader('Content-Disposition', contentDisposition(fileName));
   res.setHeader('Content-Type', 'application/octet-stream');
 

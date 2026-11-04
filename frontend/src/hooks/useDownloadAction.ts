@@ -1,3 +1,4 @@
+import { storeIdToCountry } from '../apple/config';
 import { useTranslation } from 'react-i18next';
 import { useAccounts } from './useAccounts';
 import { useToastStore } from '../store/toast';
@@ -56,6 +57,7 @@ export function useDownloadAction() {
       downloadURL: output.downloadURL,
       sinfs: output.sinfs,
       iTunesMetadata: output.iTunesMetadata,
+      region: storeIdToCountry(account.store),
     });
 
     fetchTasks();
