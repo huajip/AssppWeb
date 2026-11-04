@@ -281,7 +281,7 @@ function cleanOrphanedPackages() {
         walk(fullPath);
         if (fs.readdirSync(fullPath).length === 0) fs.rmdirSync(fullPath);
       } else if (entry.isFile() && !knownPaths.has(path.resolve(fullPath))) {
-        if (entry.name.endsWith('.part')) {
+        if (/\.part\d*$/.test(entry.name)) {
           fs.unlinkSync(fullPath);
         } else if (entry.name.endsWith('.ipa')) {
           adopt(fullPath);
