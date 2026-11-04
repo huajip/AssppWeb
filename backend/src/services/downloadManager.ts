@@ -83,7 +83,22 @@ function persistTasks() {
       filePath: t.filePath,
       createdAt: t.createdAt,
     }));
-  fs.writeFileSync(TASKS_FILE, JSON.stringify(completed, null, 2));
+  const tmp = `${TASKS_FILE}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(completed, null, 2));
+    fs.renameSync(tmp, TASKS_FILE);
+  } catch (err) {
+    console.error('[Persist] Failed to write tasks.json:', err instanceof Error ? err.message : err);
+  }
+  // Sidecar metadata next to each IPA so files can be re-adopted even if tasks.json is lost
+  for (const t of completed) {
+    try {
+      const meta = `${t.filePath!.replace(/\.ipa$/, '')}.meta.json`;
+      if (!fs.existsSync(meta)) fs.writeFileSync(meta, JSON.stringify(t, null, 2));
+    } catch {
+      // best effort
+    }
+  }
 }
 
 // Auto-cleanup: delete completed files older than configured days
@@ -208,34 +223,78 @@ function initOnStartup() {
 }
 
 function cleanOrphanedPackages() {
+  // Durable storage: never delete completed IPAs. Adopt untracked ones as completed
+  // tasks (layout: packages/<accountHash>/<bundleID>/<version>/<id>.ipa) and only
+  // remove stale .part temp files.
   const knownPaths = new Set<string>();
   for (const task of tasks.values()) {
-    if (task.filePath) {
-      knownPaths.add(path.resolve(task.filePath));
+    if (task.filePath) knownPaths.add(path.resolve(task.filePath));
+  }
+  const packagesBase = path.resolve(PACKAGES_DIR);
+  let adopted = 0;
+
+  function adopt(fullPath: string) {
+    const rel = path.relative(packagesBase, fullPath).split(path.sep);
+    const id = path.basename(fullPath, '.ipa');
+    let task: DownloadTask | undefined;
+    const meta = fullPath.replace(/\.ipa$/, '') + '.meta.json';
+    if (fs.existsSync(meta)) {
+      try {
+        const m = JSON.parse(fs.readFileSync(meta, 'utf-8'));
+        if (m && m.software) task = { ...m, id: m.id || id, filePath: fullPath, status: 'completed', progress: 100, speed: '0 B/s', downloadURL: '', sinfs: [] };
+      } catch {
+        // ignore bad sidecar
+      }
+    }
+    if (!task) {
+      if (rel.length !== 4) return;
+      const [accountHash, bundleID, version] = rel;
+      const st = fs.statSync(fullPath);
+      task = {
+        id,
+        software: {
+          id: 0, bundleID, name: bundleID, version, artistName: '', sellerName: '', description: '',
+          averageUserRating: 0, userRatingCount: 0, artworkUrl: '', screenshotUrls: [], minimumOsVersion: '',
+          releaseDate: '', primaryGenreName: '',
+        } as unknown as DownloadTask['software'],
+        accountHash,
+        downloadURL: '',
+        sinfs: [],
+        status: 'completed',
+        progress: 100,
+        speed: '0 B/s',
+        filePath: fullPath,
+        createdAt: st.mtime.toISOString(),
+      };
+    }
+    if (!tasks.has(task.id)) {
+      tasks.set(task.id, task);
+      adopted++;
     }
   }
 
-  const packagesBase = path.resolve(PACKAGES_DIR);
-
-  function walkAndClean(dir: string) {
+  function walk(dir: string) {
     if (!fs.existsSync(dir)) return;
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
-    for (const entry of entries) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        walkAndClean(fullPath);
-        // Remove empty directories
-        if (fs.readdirSync(fullPath).length === 0) {
-          fs.rmdirSync(fullPath);
-        }
+        walk(fullPath);
+        if (fs.readdirSync(fullPath).length === 0) fs.rmdirSync(fullPath);
       } else if (entry.isFile() && !knownPaths.has(path.resolve(fullPath))) {
-        // Orphaned file or leftover .part temp file — remove
-        fs.unlinkSync(fullPath);
+        if (entry.name.endsWith('.part')) {
+          fs.unlinkSync(fullPath);
+        } else if (entry.name.endsWith('.ipa')) {
+          adopt(fullPath);
+        }
       }
     }
   }
 
-  walkAndClean(packagesBase);
+  walk(packagesBase);
+  if (adopted > 0) {
+    console.log(`[Startup] Adopted ${adopted} untracked IPA file(s)`);
+    persistTasks();
+  }
 }
 
 // Initialize on startup
@@ -299,6 +358,8 @@ export function deleteTask(id: string): boolean {
     const packagesBase = path.resolve(PACKAGES_DIR);
     if (resolved.startsWith(packagesBase + path.sep) && fs.existsSync(resolved)) {
       fs.unlinkSync(resolved);
+      const metaPath = resolved.replace(/\.ipa$/, '') + '.meta.json';
+      if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
 
       // Clean up empty parent directories
       let dir = path.dirname(resolved);
