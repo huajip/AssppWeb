@@ -66,7 +66,7 @@ async function fetchDownloadSizeBytes(downloadURL: string): Promise<number | nul
 
 // Start a new download
 router.post('/downloads', async (req: Request, res: Response) => {
-  const { software, accountHash, downloadURL, sinfs, iTunesMetadata, region } = req.body;
+  const { software, accountHash, downloadURL, sinfs, iTunesMetadata, region, accountEmail } = req.body;
 
   if (!software || !accountHash || !downloadURL || !sinfs) {
     res.status(400).json({
@@ -109,7 +109,7 @@ router.post('/downloads', async (req: Request, res: Response) => {
   }
 
   try {
-    const task = createTask(software, accountHash, downloadURL, sinfs, iTunesMetadata, region);
+    const task = createTask(software, accountHash, downloadURL, sinfs, iTunesMetadata, region, accountEmail);
     res.status(201).json(sanitizeTaskForResponse(task));
   } catch (err) {
     console.error('Create download error:', err instanceof Error ? err.message : err);

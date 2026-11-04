@@ -3,29 +3,16 @@ import fs from 'fs';
 import path from 'path';
 import { config } from '../config.js';
 import { MIN_ACCOUNT_HASH_LENGTH } from '../config.js';
-import { getAllTasks } from '../services/downloadManager.js';
+import { getAllTasks, deleteTask } from '../services/downloadManager.js';
 import { getIdParam } from '../utils/route.js';
 import { createDownloadToken } from '../utils/downloadLink.js';
+import { sanitizeFilename, packageFileName } from '../utils/packageFileName.js';
+import { r2Enabled, presignGet } from '../services/r2Storage.js';
 import type { PackageInfo } from '../types/index.js';
 
 const router = Router();
 
-// Strip control chars, quotes, slashes and other filesystem-unsafe chars (keeps Unicode)
-export function sanitizeFilename(name: string): string {
-  return name
-    .replace(/[\x00-\x1F\x7F"\\/:*?<>|]/g, '-')
-    .trim()
-    .slice(0, 200);
-}
-
-// {name}_{bundleID}_{version}_{region}.ipa — region omitted when unknown (legacy tasks)
-// Keep in sync with frontend packageFileName (components/Download/PackageQuickActions.tsx)
-export function packageFileName(task: { software: { name: string; bundleID: string; version: string }; region?: string }): string {
-  const parts = [task.software.name, task.software.bundleID, task.software.version, task.region]
-    .filter((p): p is string => typeof p === 'string' && p.trim() !== '')
-    .map((p) => p.replace(/_+/g, '-').replace(/\s+/g, ' ').trim());
-  return `${sanitizeFilename(parts.join('_'))}.ipa`;
-}
+export { sanitizeFilename, packageFileName } from '../utils/packageFileName.js';
 
 // RFC 6266 / RFC 5987: ASCII fallback in filename=, UTF-8 in filename* (Safari/Chrome/Firefox honor filename*)
 export function contentDisposition(fileName: string): string {
@@ -55,14 +42,16 @@ router.get('/packages', (req: Request, res: Response) => {
   );
 
   for (const task of completedTasks) {
-    if (!task.filePath || !fs.existsSync(task.filePath)) continue;
+    const local = !!task.filePath && fs.existsSync(task.filePath);
+    const remote = task.r2Status === 'uploaded' && !!task.r2Key;
+    if (!local && !remote) continue;
 
-    const stats = fs.statSync(task.filePath);
+    const fileSize = local ? fs.statSync(task.filePath!).size : task.fileSize ?? 0;
     packages.push({
       id: task.id,
       software: task.software,
       accountHash: task.accountHash,
-      fileSize: stats.size,
+      fileSize,
       createdAt: task.createdAt,
     });
   }
@@ -71,7 +60,7 @@ router.get('/packages', (req: Request, res: Response) => {
 });
 
 // Issue a short-lived signed download link (requires access auth + accountHash)
-router.post('/packages/:id/download-link', (req: Request, res: Response) => {
+router.post('/packages/:id/download-link', async (req: Request, res: Response) => {
   const accountHash = (req.query.accountHash ?? req.body?.accountHash) as string;
   if (!accountHash || accountHash.length < MIN_ACCOUNT_HASH_LENGTH) {
     res.status(400).json({ error: 'Missing or invalid accountHash' });
@@ -79,12 +68,24 @@ router.post('/packages/:id/download-link', (req: Request, res: Response) => {
   }
   const id = getIdParam(req);
   const task = getAllTasks().find((t) => t.id === id && t.status === 'completed');
-  if (!task || !task.filePath || !fs.existsSync(task.filePath)) {
+  const remote = !!task && r2Enabled() && task.r2Status === 'uploaded' && !!task.r2Key;
+  if (!task || (!remote && (!task.filePath || !fs.existsSync(task.filePath)))) {
     res.status(404).json({ error: 'Package not found' });
     return;
   }
   if (task.accountHash !== accountHash) {
     res.status(403).json({ error: 'Access denied' });
+    return;
+  }
+  if (remote) {
+    try {
+      // Browser downloads straight from R2 via a short-lived presigned GET
+      const { url, expiresAt } = await presignGet(task.r2Key!, packageFileName(task));
+      res.json({ url, expiresAt, source: 'r2' });
+    } catch (err) {
+      console.error('[R2] presign failed:', err instanceof Error ? err.message : err);
+      res.status(502).json({ error: 'Failed to sign R2 link' });
+    }
     return;
   }
   const { exp, sig } = createDownloadToken(id, accountHash);
@@ -175,6 +176,9 @@ router.delete('/packages/:id', (req: Request, res: Response) => {
       }
     }
   }
+
+  // R2-backed package: drop the record locally (the R2 object is kept on purpose)
+  if (task.r2Status === 'uploaded') deleteTask(id);
 
   res.json({ success: true });
 });

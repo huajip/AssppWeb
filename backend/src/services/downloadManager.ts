@@ -4,6 +4,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { config, DOWNLOAD_TIMEOUT_MS } from '../config.js';
 import { inject } from './sinfInjector.js';
 import { ChunkedDownloader } from './chunkedDownloader.js';
+import { r2Config, packedObjectKey, uploadFile } from './r2Storage.js';
+import { packageFileName } from '../utils/packageFileName.js';
 import type { DownloadTask, Software, Sinf } from '../types/index.js';
 
 const tasks = new Map<string, DownloadTask>();
@@ -63,7 +65,7 @@ export function sanitizeTaskForResponse(
   const { downloadURL, sinfs, iTunesMetadata, filePath, ...safe } = task;
   return {
     ...safe,
-    hasFile: !!filePath && fs.existsSync(filePath),
+    hasFile: (!!filePath && fs.existsSync(filePath)) || (task.r2Status === 'uploaded' && !!task.r2Key),
   };
 }
 
@@ -82,6 +84,11 @@ function persistTasks() {
       speed: t.speed,
       filePath: t.filePath,
       createdAt: t.createdAt,
+      region: t.region,
+      accountEmail: t.accountEmail,
+      fileSize: t.fileSize,
+      r2Key: t.r2Key,
+      r2Status: t.r2Status === 'uploaded' ? 'uploaded' : undefined,
     }));
   const tmp = `${TASKS_FILE}.${process.pid}.tmp`;
   try {
@@ -94,7 +101,10 @@ function persistTasks() {
   for (const t of completed) {
     try {
       const meta = `${t.filePath!.replace(/\.ipa$/, '')}.meta.json`;
-      if (!fs.existsSync(meta)) fs.writeFileSync(meta, JSON.stringify(t, null, 2));
+      // Rewrite when stale so region / R2 state reach the sidecar too
+      const body = JSON.stringify(t, null, 2);
+      const cur = fs.existsSync(meta) ? fs.readFileSync(meta, 'utf-8') : '';
+      if (cur !== body && (fs.existsSync(t.filePath!) || fs.existsSync(meta))) fs.writeFileSync(meta, body);
     } catch {
       // best effort
     }
@@ -192,7 +202,9 @@ function initOnStartup() {
       if (Array.isArray(data)) {
         for (const item of data) {
           // Only restore completed tasks whose IPA file still exists
-          if (item.id && item.status === 'completed' && item.filePath && fs.existsSync(item.filePath)) {
+          const local = item.filePath && fs.existsSync(item.filePath);
+          const remote = item.r2Status === 'uploaded' && typeof item.r2Key === 'string' && item.r2Key;
+          if (item.id && item.status === 'completed' && item.filePath && (local || remote)) {
             const task: DownloadTask = {
               id: item.id,
               software: item.software,
@@ -204,6 +216,11 @@ function initOnStartup() {
               speed: '0 B/s',
               filePath: item.filePath,
               createdAt: item.createdAt,
+              region: normalizeRegion(item.region),
+              accountEmail: typeof item.accountEmail === 'string' ? item.accountEmail : undefined,
+              fileSize: typeof item.fileSize === 'number' ? item.fileSize : undefined,
+              r2Key: remote ? item.r2Key : undefined,
+              r2Status: remote ? 'uploaded' : undefined,
             };
             tasks.set(task.id, task);
           }
@@ -220,6 +237,49 @@ function initOnStartup() {
   // Run time-based cleanup once on startup, then schedule daily
   runTimeCleanup();
   scheduleDailyCleanup();
+
+  if (r2Config?.backfillOnStartup) {
+    const pending = Array.from(tasks.values()).filter(
+      (t) => t.status === 'completed' && t.r2Status !== 'uploaded' && t.filePath && fs.existsSync(t.filePath),
+    );
+    if (pending.length) console.log(`[R2] Backfill: queueing ${pending.length} package(s)`);
+    for (const t of pending) queueR2Upload(t);
+  }
+}
+
+// --- R2 upload queue (sequential; one multi-GB upload at a time) ---
+let r2Chain: Promise<void> = Promise.resolve();
+
+export function queueR2Upload(task: DownloadTask): void {
+  if (!r2Config || !task.filePath) return;
+  task.r2Status = 'pending';
+  r2Chain = r2Chain.then(() => uploadTaskToR2(task)).catch(() => {});
+}
+
+export async function uploadTaskToR2(task: DownloadTask, cfg = r2Config): Promise<void> {
+  if (!cfg || !task.filePath || !tasks.has(task.id)) return;
+  const local = path.resolve(task.filePath);
+  if (!local.startsWith(path.resolve(PACKAGES_DIR) + path.sep) || !fs.existsSync(local)) return;
+  const key = packedObjectKey(task.accountEmail, packageFileName(task));
+  task.r2Status = 'uploading';
+  task.r2Error = undefined;
+  notifyProgress(task);
+  try {
+    const size = await uploadFile(local, key, cfg);
+    task.fileSize = size;
+    task.r2Key = key;
+    task.r2Status = 'uploaded';
+    console.log(`[R2] Uploaded ${task.id} -> ${key} (${size} bytes)`);
+    if (cfg.deleteLocalAfterUpload && tasks.has(task.id)) {
+      fs.unlinkSync(local);
+    }
+    persistTasks();
+  } catch (err) {
+    task.r2Status = 'failed';
+    task.r2Error = err instanceof Error ? err.message : String(err);
+    console.error(`[R2] Upload ${task.id} failed:`, task.r2Error);
+  }
+  notifyProgress(task);
 }
 
 function cleanOrphanedPackages() {
@@ -273,6 +333,20 @@ function cleanOrphanedPackages() {
     }
   }
 
+  // IPA already moved to R2: only the sidecar remains
+  function adoptRemote(metaPath: string) {
+    const ipa = metaPath.replace(/\.meta\.json$/, '.ipa');
+    if (fs.existsSync(ipa)) return;
+    try {
+      const m = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+      if (!m?.software || !m.id || m.r2Status !== 'uploaded' || !m.r2Key || tasks.has(m.id)) return;
+      tasks.set(m.id, { ...m, filePath: ipa, status: 'completed', progress: 100, speed: '0 B/s', downloadURL: '', sinfs: [] });
+      adopted++;
+    } catch {
+      // ignore bad sidecar
+    }
+  }
+
   function walk(dir: string) {
     if (!fs.existsSync(dir)) return;
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -285,6 +359,8 @@ function cleanOrphanedPackages() {
           fs.unlinkSync(fullPath);
         } else if (entry.name.endsWith('.ipa')) {
           adopt(fullPath);
+        } else if (entry.name.endsWith('.meta.json')) {
+          adoptRemote(fullPath);
         }
       }
     }
@@ -356,8 +432,9 @@ export function deleteTask(id: string): boolean {
   if (task.filePath) {
     const resolved = path.resolve(task.filePath);
     const packagesBase = path.resolve(PACKAGES_DIR);
-    if (resolved.startsWith(packagesBase + path.sep) && fs.existsSync(resolved)) {
-      fs.unlinkSync(resolved);
+    const metaExists = fs.existsSync(resolved.replace(/\.ipa$/, '') + '.meta.json');
+    if (resolved.startsWith(packagesBase + path.sep) && (fs.existsSync(resolved) || metaExists)) {
+      if (fs.existsSync(resolved)) fs.unlinkSync(resolved);
       const metaPath = resolved.replace(/\.ipa$/, '') + '.meta.json';
       if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
 
@@ -422,6 +499,7 @@ export function createTask(
   sinfs: Sinf[],
   iTunesMetadata?: string,
   region?: string,
+  accountEmail?: string,
 ): DownloadTask {
   // Validate download URL
   validateDownloadURL(downloadURL);
@@ -439,6 +517,7 @@ export function createTask(
     sinfs,
     iTunesMetadata,
     region: normalizeRegion(region),
+    accountEmail: typeof accountEmail === 'string' && accountEmail.trim() ? accountEmail.trim().slice(0, 254) : undefined,
     status: 'pending',
     progress: 0,
     speed: '0 B/s',
@@ -528,9 +607,16 @@ async function startDownload(task: DownloadTask) {
     task.sinfs = [];
     task.iTunesMetadata = undefined;
 
+    try {
+      task.fileSize = fs.statSync(filePath).size;
+    } catch {
+      // ignore
+    }
+
     // Persist completed task metadata (no secrets)
     persistTasks();
     notifyProgress(task);
+    queueR2Upload(task);
   } catch (err) {
     chunkDownloaders.delete(task.id);
     abortControllers.delete(task.id);

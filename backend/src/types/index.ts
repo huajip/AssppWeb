@@ -39,6 +39,13 @@ export interface DownloadTask {
   error?: string;
   filePath?: string;
   createdAt: string;
+  /** Apple ID email of the downloading account (used for the R2 object path) */
+  accountEmail?: string;
+  /** Size in bytes, recorded so uploaded packages can be listed after local deletion */
+  fileSize?: number;
+  r2Key?: string;
+  r2Status?: 'pending' | 'uploading' | 'uploaded' | 'failed';
+  r2Error?: string;
 }
 
 export interface PackageInfo {

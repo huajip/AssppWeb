@@ -58,6 +58,7 @@ export function useDownloadAction() {
       sinfs: output.sinfs,
       iTunesMetadata: output.iTunesMetadata,
       region: storeIdToCountry(account.store),
+      accountEmail: account.email,
     });
 
     fetchTasks();
